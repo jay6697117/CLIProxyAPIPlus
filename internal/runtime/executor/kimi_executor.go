@@ -78,6 +78,7 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
 		return e.ClaudeExecutor.Execute(ctx, auth, req, opts)
 	}
+	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
@@ -175,7 +176,7 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	var param any
 	// Note: TranslateNonStream uses req.Model (original with suffix) to preserve
 	// the original model name in the response for client compatibility.
-	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, body, data, &param)
+	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, data, &param)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -187,6 +188,7 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
 		return e.ClaudeExecutor.ExecuteStream(ctx, auth, req, opts)
 	}
+	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	token := kimiCreds(auth)
@@ -286,13 +288,13 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 1_048_576) // 1MB
 		var param any
+		var streamUsage helps.StreamUsageBuffer
+		defer streamUsage.Publish(ctx, reporter)
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
-				reporter.Publish(ctx, detail)
-			}
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param)
+			streamUsage.ObserveOpenAIStream(line)
+			chunks := sdktranslator.TranslateStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param)
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
@@ -301,7 +303,7 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 				}
 			}
 		}
-		doneChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
+		doneChunks := sdktranslator.TranslateStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
 		for i := range doneChunks {
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Payload: doneChunks[i]}:
